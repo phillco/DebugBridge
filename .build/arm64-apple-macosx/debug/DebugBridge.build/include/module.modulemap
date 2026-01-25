@@ -1,3 +1,0 @@
-module DebugBridge {
-    header "/Users/phillco/Dropbox/Projects/swiftprojects/DebugBridge/.build/arm64-apple-macosx/debug/DebugBridge.build/include/DebugBridge-Swift.h"
-}
