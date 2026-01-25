@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/phillco/Dropbox/Projects/swiftprojects/DebugBridge/.build/arm64-apple-macosx/debug/DebugBridge.build/master.swiftdeps"
+  },
+  "/Users/phillco/Dropbox/Projects/swiftprojects/DebugBridge/Sources/DebugBridge/DebugBridge.swift": {
+    "dependencies": "/Users/phillco/Dropbox/Projects/swiftprojects/DebugBridge/.build/arm64-apple-macosx/debug/DebugBridge.build/DebugBridge.d",
+    "object": "/Users/phillco/Dropbox/Projects/swiftprojects/DebugBridge/.build/arm64-apple-macosx/debug/DebugBridge.build/DebugBridge.swift.o",
+    "swiftmodule": "/Users/phillco/Dropbox/Projects/swiftprojects/DebugBridge/.build/arm64-apple-macosx/debug/DebugBridge.build/DebugBridge~partial.swiftmodule",
+    "swift-dependencies": "/Users/phillco/Dropbox/Projects/swiftprojects/DebugBridge/.build/arm64-apple-macosx/debug/DebugBridge.build/DebugBridge.swiftdeps",
+    "diagnostics": "/Users/phillco/Dropbox/Projects/swiftprojects/DebugBridge/.build/arm64-apple-macosx/debug/DebugBridge.build/DebugBridge.dia"
+  }
+}
