@@ -143,6 +143,9 @@ vibecontrol ipad action navigate '{"screen": "settings"}'
 
 # Take screenshot
 vibecontrol ipad screenshot
+
+# Full app description (info + state + elements + actions in one call)
+vibecontrol ipad describe
 ```
 
 ### 3. Control via relay HTTP API (low-level)
@@ -164,6 +167,7 @@ curl -X POST http://localhost:8767/device/ipad/request \
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | App info (name, version, available actions) |
+| GET | `/describe` | Combined app info, state, UI elements, and actions in one call |
 | GET | `/state` | Current app state from state provider |
 | GET | `/actions` | List registered action names |
 | GET | `/screenshot` | Base64 PNG screenshot |
@@ -258,6 +262,14 @@ Then control from CLI:
 vibecontrol ipad tap "refresh-button"
 vibecontrol ipad tap "session-0:2.1"
 ```
+
+### Elements vs Full Accessibility Tree
+
+DebugBridge's `/elements` and `/describe` only return views explicitly marked with accessibility identifiers — **not** the full accessibility tree. This is by design: it encourages apps to register semantic actions and tag only what matters, keeping responses compact and token-efficient.
+
+However, this means DebugBridge sees fewer elements than XcodeBuildMCP's `describe_ui`, which walks the entire `UIWindow` hierarchy. For agents, this creates a gap: workflows that work via the MCP simulator path (full tree) may not translate directly to DebugBridge (tagged elements only).
+
+**Future consideration:** A full-tree fallback option (e.g., `GET /elements?full=true`) would close this gap and make it easier to test the same automation paths through either DebugBridge or XcodeBuildMCP. The trade-off is response size and latency — the full tree can be very large. The current tagged-only approach remains the recommended default.
 
 ## Relay Server
 

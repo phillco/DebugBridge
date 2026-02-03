@@ -44,6 +44,12 @@ public final class DebugBridge: ObservableObject {
     /// State provider for querying app state
     private var stateProvider: (() -> [String: Any])?
 
+    /// Crash provider for querying crash history
+    private var crashProvider: (() -> [String: Any])?
+
+    /// Stall provider for querying stall history
+    private var stallProvider: ((Int?) -> [String: Any])?
+
     /// Screenshot provider
     private var screenshotProvider: (() async -> Data?)?
 
@@ -79,6 +85,16 @@ public final class DebugBridge: ObservableObject {
     /// Register a state provider for querying app state
     public func register(state provider: @escaping () -> [String: Any]) {
         self.stateProvider = provider
+    }
+
+    /// Register a crash provider for querying crash history
+    public func register(crashes provider: @escaping () -> [String: Any]) {
+        self.crashProvider = provider
+    }
+
+    /// Register a stall provider for querying stall history
+    public func register(stalls provider: @escaping (_ limit: Int?) -> [String: Any]) {
+        self.stallProvider = provider
     }
 
     /// Register a screenshot provider
@@ -194,7 +210,17 @@ public final class DebugBridge: ObservableObject {
         }
 
         let method = parts[0]
-        let path = parts[1]
+        let rawPath = parts[1]
+        let components = URLComponents(string: "http://localhost\(rawPath)")
+        let path = components?.path ?? rawPath
+        var query: [String: String] = [:]
+        if let items = components?.queryItems {
+            for item in items {
+                if let value = item.value {
+                    query[item.name] = value
+                }
+            }
+        }
 
         // Extract body for POST requests
         var body: [String: Any] = [:]
@@ -207,11 +233,34 @@ public final class DebugBridge: ObservableObject {
         }
 
         // Route request
-        let response = await routeRequest(method: method, path: path, body: body)
+        let response = await routeRequest(method: method, path: path, query: query, body: body)
         sendResponse(response, to: connection)
     }
 
-    private func routeRequest(method: String, path: String, body: [String: Any]) async -> Response {
+    func handleRelayRequest(method: String, path: String, query: [String: String], body: [String: Any]) async -> [String: Any] {
+        let response = await routeRequest(method: method, path: path, query: query, body: body)
+        return responsePayload(response)
+    }
+
+    func relayHelloPayload() async -> [String: Any] {
+        var payload = info()
+        #if canImport(UIKit)
+        payload["deviceName"] = UIDevice.current.name
+        if let vendorId = UIDevice.current.identifierForVendor?.uuidString {
+            payload["deviceId"] = vendorId
+        }
+        if let alias = UserDefaults.standard.string(forKey: "debugBridgeDeviceAlias"), !alias.isEmpty {
+            payload["deviceAlias"] = alias
+        }
+        payload["deviceModel"] = UIDevice.current.model
+        payload["deviceLocalizedModel"] = UIDevice.current.localizedModel
+        payload["systemName"] = UIDevice.current.systemName
+        payload["systemVersion"] = UIDevice.current.systemVersion
+        #endif
+        return payload
+    }
+
+    private func routeRequest(method: String, path: String, query: [String: String], body: [String: Any]) async -> Response {
         let pathComponents = path.split(separator: "/").map(String.init)
 
         // Route based on method and path
@@ -219,12 +268,65 @@ public final class DebugBridge: ObservableObject {
             return .json(info())
         }
 
+        if method == "GET" && pathComponents == ["describe"] {
+            return .json(describe())
+        }
+
         if method == "GET" && pathComponents == ["state"] {
             return .json(state())
         }
 
+        if method == "GET" && pathComponents == ["crashes"] {
+            if let crashProvider {
+                return .json(crashProvider())
+            }
+            return .notFound("Crash provider not registered")
+        }
+
         if method == "GET" && pathComponents == ["actions"] {
             return .json(["actions": Array(actions.keys)])
+        }
+
+        if method == "GET" && pathComponents == ["logs"] {
+            let since = query["since"].flatMap { Int($0) }
+            let limit = query["limit"].flatMap { Int($0) } ?? 200
+            let snapshot = await DebugLogStore.shared.snapshot(since: since, limit: limit)
+            let payload: [String: Any] = [
+                "logs": snapshot.entries.map { $0.toDict() },
+                "next": snapshot.next
+            ]
+            return .json(payload)
+        }
+
+        if method == "GET" && pathComponents == ["metrics"] {
+            let since = query["since"].flatMap { Int($0) }
+            let limit = query["limit"].flatMap { Int($0) } ?? 200
+            let snapshot = await DebugMetricStore.shared.snapshot(since: since, limit: limit)
+            let payload: [String: Any] = [
+                "metrics": snapshot.entries.map { $0.toDict() },
+                "next": snapshot.next
+            ]
+            return .json(payload)
+        }
+
+        if method == "GET" && pathComponents == ["perf"] {
+            let since = query["since"].flatMap { Int($0) }
+            let limit = query["limit"].flatMap { Int($0) } ?? 50
+            let sort = query["sort"] ?? "total"
+            let summary = await DebugMetricStore.shared.summary(since: since, limit: limit, sort: sort)
+            let payload: [String: Any] = [
+                "summary": summary.summaries.map { $0.toDict() },
+                "next": summary.next
+            ]
+            return .json(payload)
+        }
+
+        if method == "GET" && pathComponents == ["stalls"] {
+            guard let stallProvider else {
+                return .notFound("Stall provider not registered")
+            }
+            let limit = query["limit"].flatMap { Int($0) }
+            return .json(stallProvider(limit))
         }
 
         if method == "GET" && pathComponents == ["screenshot"] {
@@ -372,6 +474,21 @@ public final class DebugBridge: ObservableObject {
         })
     }
 
+    private func responsePayload(_ response: Response) -> [String: Any] {
+        switch response {
+        case .json(let dict):
+            return ["status": response.statusCode, "contentType": "application/json", "body": dict]
+        case .png(let data):
+            return ["status": response.statusCode, "contentType": "image/png", "body": data.base64EncodedString()]
+        case .badRequest(let msg):
+            return ["status": response.statusCode, "contentType": "application/json", "body": ["error": msg]]
+        case .notFound(let msg):
+            return ["status": response.statusCode, "contentType": "application/json", "body": ["error": msg]]
+        case .error(let msg):
+            return ["status": response.statusCode, "contentType": "application/json", "body": ["error": msg]]
+        }
+    }
+
     // MARK: - Info & State
 
     private func info() -> [String: Any] {
@@ -380,7 +497,12 @@ public final class DebugBridge: ObservableObject {
             "version": appVersion,
             "actions": Array(actions.keys),
             "hasState": stateProvider != nil,
-            "hasScreenshot": screenshotProvider != nil
+            "hasCrashes": crashProvider != nil,
+            "hasStalls": stallProvider != nil,
+            "hasScreenshot": screenshotProvider != nil,
+            "hasLogs": true,
+            "hasMetrics": true,
+            "hasPerf": true
         ]
         #if canImport(UIKit)
         info["hasElements"] = true
@@ -390,6 +512,39 @@ public final class DebugBridge: ObservableObject {
 
     private func state() -> [String: Any] {
         stateProvider?() ?? ["error": "No state provider registered"]
+    }
+
+    private func describe() -> [String: Any] {
+        var result: [String: Any] = [
+            "app": appName,
+            "version": appVersion,
+            "actions": Array(actions.keys).sorted(),
+        ]
+        if let stateProvider {
+            result["state"] = stateProvider()
+        }
+        #if canImport(UIKit)
+        let elements = UIElementInspector.shared.getElements()
+        result["elements"] = elements.map { element -> [String: Any] in
+            var dict: [String: Any] = [
+                "id": element.id,
+                "type": element.type,
+                "enabled": element.enabled,
+                "frame": [
+                    "x": element.frame.x,
+                    "y": element.frame.y,
+                    "width": element.frame.width,
+                    "height": element.frame.height
+                ],
+                "traits": element.traits
+            ]
+            if let label = element.label { dict["label"] = label }
+            if let value = element.value { dict["value"] = value }
+            return dict
+        }
+        result["elementCount"] = elements.count
+        #endif
+        return result
     }
 }
 
@@ -407,6 +562,12 @@ public struct Parameters {
 
     public func string(_ key: String) -> String? { dict[key] as? String }
     public func int(_ key: String) -> Int? { dict[key] as? Int }
+    public func double(_ key: String) -> Double? {
+        if let value = dict[key] as? Double { return value }
+        if let value = dict[key] as? Int { return Double(value) }
+        if let value = dict[key] as? String { return Double(value) }
+        return nil
+    }
     public func bool(_ key: String) -> Bool? { dict[key] as? Bool }
     public func array<T>(_ key: String) -> [T]? { dict[key] as? [T] }
 }
