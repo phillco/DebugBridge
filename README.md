@@ -10,78 +10,51 @@ Lightweight HTTP control server for iOS apps. Enables remote control, inspection
 - **Voice Control**: Scriptable UI = accessible UI
 - **Debugging**: Query app state remotely
 
-## Architecture: Relay Mode (Recommended)
+## Architecture
 
-**IMPORTANT:** DebugBridge supports two modes. **Use relay mode** to avoid iOS Local Network permission issues.
-
-### Relay Mode ✅ (Recommended)
-
-iOS devices connect to a **central relay server** via outbound WebSocket:
+iOS devices connect to a **central relay server** via outbound WebSocket. `vibecontrol` (CLI) talks to the relay, not directly to devices.
 
 ```
 [iOS Device] --WebSocket--> [Relay Server] <--HTTP-- [vibecontrol/CLI]
-   (port --)                 (port 8767)
+   (outbound)                (port 8767)
 ```
 
-**Benefits:**
-- ✅ **No iOS permissions required** (outbound connections are always allowed)
-- ✅ **Central hub** - one server for all devices
-- ✅ **Works over Tailscale/VPN** - devices can be anywhere
-- ✅ **Reliable** - doesn't depend on iOS Local Network permission prompt
+- **No iOS permissions required** - outbound connections are always allowed
+- **Works everywhere** - real devices, simulators, over Tailscale/VPN
+- **Central hub** - one server, all devices
+- **Auto-discovery** - `vibecontrol` finds the relay automatically (localhost, studio, mba)
 
-**Setup:**
+### Setup
 
 1. **Start relay server** (on your laptop/Studio):
    ```bash
-   ~/bin/pc/debugbridge-relay --host 0.0.0.0 --port 8767
+   # Auto-start via launchd (recommended):
+   launchagent-gen com.phillco.debugbridge-relay --reload
+
+   # Or run manually:
+   debugbridge-relay --host 0.0.0.0 --port 8767
    ```
 
-2. **Configure iOS app** to use relay:
+2. **Configure iOS app** to connect to relay:
    ```swift
    #if DEBUG
    func setupDebugBridge() {
-       // Use relay instead of direct server
+       DebugBridge.shared.register(actions: [...])
+
        let relayURL = URL(string: "ws://studio.tailced1f.ts.net:8767/bridge")!
        Task {
            await DebugBridgeRelay.shared.start(url: relayURL)
        }
-
-       // Register actions as usual
-       DebugBridge.shared.register(actions: [...])
    }
    #endif
    ```
 
 3. **Control via vibecontrol**:
    ```bash
-   # vibecontrol automatically uses relay mode
    vibecontrol                    # List connected devices
    vibecontrol ipad screenshot    # Take screenshot
+   vibecontrol iphone action intent.resumePlayback
    ```
-
-**Auto-start relay with launchd:**
-```bash
-# Template already exists in ~/bin/dotfiles/LaunchAgents/
-launchagent-gen com.phillco.debugbridge-relay --reload
-```
-
-### Direct Mode ⚠️ (NOT Recommended)
-
-Each device runs its own HTTP server:
-
-```
-[iOS Device:8765] <--HTTP-- [vibecontrol/CLI]
-```
-
-**Problems:**
-- ❌ Requires iOS Local Network permission (often fails to prompt)
-- ❌ Permission prompt is unreliable - depends on Bonjour service matching
-- ❌ Each device needs its own port
-- ❌ Only works on local network
-
-**Only use direct mode for:**
-- Debugging DebugBridge itself
-- Environments where relay server can't run
 
 ## Installation
 
@@ -92,7 +65,7 @@ File > Add Package Dependencies > Add Local > ~/Dropbox/Projects/swiftprojects/D
 
 ## Usage
 
-### 1. Register actions and start the server
+### 1. Register actions and connect to relay
 
 ```swift
 import DebugBridge
@@ -146,60 +119,42 @@ struct MyApp: App {
             }
         })
 
-        bridge.start()
+        // Connect to relay server
+        let relayURL = URL(string: "ws://studio.tailced1f.ts.net:8767/bridge")!
+        Task { await DebugBridgeRelay.shared.start(url: relayURL) }
     }
 }
 ```
 
-### 2. Control from CLI
+### 2. Control via vibecontrol
 
 ```bash
+# List connected devices (auto-discovers relay)
+vibecontrol
+
 # Get app info
-curl http://ipad-mini:8765/
-
-# Get current state
-curl http://ipad-mini:8765/state
-
-# List available actions
-curl http://ipad-mini:8765/actions
+vibecontrol ipad info
 
 # Execute an action
-curl -X POST http://ipad-mini:8765/action/refresh
+vibecontrol ipad action refresh
 
 # Execute action with parameters
-curl -X POST http://ipad-mini:8765/action/navigate \
-  -H "Content-Type: application/json" \
-  -d '{"screen": "settings"}'
+vibecontrol ipad action navigate '{"screen": "settings"}'
 
-# Batch execute actions
-curl -X POST http://ipad-mini:8765/actions \
-  -H "Content-Type: application/json" \
-  -d '{"actions": [
-    {"name": "refresh"},
-    {"name": "selectSession", "params": {"pane": "0:6.1"}}
-  ]}'
-
-# Get screenshot (base64 PNG)
-curl http://ipad-mini:8765/screenshot
+# Take screenshot
+vibecontrol ipad screenshot
 ```
 
-### 3. Use from Claude Agent
+### 3. Control via relay HTTP API (low-level)
 
-```python
-import httpx
+```bash
+# List connected devices
+curl http://localhost:8767/devices
 
-def control_app(device: str, port: int = 8765):
-    base = f"http://{device}:{port}"
-
-    # Get state
-    state = httpx.get(f"{base}/state").json()
-    print(f"Current screen: {state['screen']}")
-
-    # Execute action
-    httpx.post(f"{base}/action/refresh")
-
-    # Navigate
-    httpx.post(f"{base}/action/navigate", json={"screen": "settings"})
+# Send request to a device through relay
+curl -X POST http://localhost:8767/device/ipad/request \
+  -H "Content-Type: application/json" \
+  -d '{"method": "POST", "path": "/action/refresh", "query": {}, "body": {}}'
 ```
 
 ## API Reference
@@ -248,10 +203,7 @@ return .error("Something failed")  // {"status": "error", "error": "..."}
 
 ⚠️ **DebugBridge only runs in DEBUG builds** - it's automatically disabled in release.
 
-The server binds to all interfaces, so it's accessible over the network. For production-adjacent testing, consider:
-- Using a VPN/Tailscale
-- Adding authentication headers
-- Restricting to localhost
+The relay server should run on a trusted network (e.g., behind Tailscale). All device communication flows through the relay - devices don't expose any ports themselves.
 
 ## Architecture Benefits
 
@@ -303,66 +255,21 @@ SavedLoopCard(loop: loop)
 
 Then control from CLI:
 ```bash
-curl -X POST http://device:8765/tap -d '{"id": "refresh-button"}'
-curl -X POST http://device:8765/tap -d '{"id": "session-0:2.1"}'
-
-# Stream-ish log polling
-curl "http://device:8765/logs?limit=200"
-curl "http://device:8765/logs?since=1234&limit=200"
-
-# Metrics polling
-curl "http://device:8765/metrics?limit=200"
-curl "http://device:8765/metrics?since=456&limit=200"
+vibecontrol ipad tap "refresh-button"
+vibecontrol ipad tap "session-0:2.1"
 ```
 
 ## Relay Server
 
-The relay server (`~/bin/pc/debugbridge-relay`) is a lightweight WebSocket hub written in Python (aiohttp).
+The relay server (`~/bin/pc/debugbridge-relay`) is a lightweight WebSocket hub (Python/aiohttp).
 
-### How it works:
-
-1. **iOS devices connect** via WebSocket to `/bridge` endpoint
-2. **Devices send "hello"** with metadata (device name, app, version, actions)
-3. **Relay maintains device registry** at `/devices` endpoint
-4. **Client requests** are forwarded to the correct device via `/device/{device}/request`
-5. **Devices respond** via WebSocket, relay returns HTTP response to client
-
-### API Endpoints:
+**How it works:** iOS devices connect via WebSocket → relay maintains device registry → `vibecontrol` sends HTTP requests to relay → relay forwards to device via WebSocket → response flows back.
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/devices` | List connected devices with metadata |
 | GET | `/bridge` | WebSocket endpoint (iOS devices connect here) |
 | POST | `/device/{device}/request` | Forward request to specific device |
-
-### Example: Direct relay usage
-
-```bash
-# List connected devices
-curl http://localhost:8767/devices
-
-# Send request to specific device
-curl -X POST http://localhost:8767/device/ipad/request \
-  -H "Content-Type: application/json" \
-  -d '{
-    "method": "GET",
-    "path": "/state",
-    "query": {},
-    "body": {}
-  }'
-
-# Take screenshot through relay
-curl -X POST http://localhost:8767/device/ipad/request \
-  -H "Content-Type: application/json" \
-  -d '{
-    "method": "GET",
-    "path": "/screenshot",
-    "query": {},
-    "body": {}
-  }' | jq -r '.body' | base64 -d > screenshot.png
-```
-
-**Note:** `vibecontrol` wraps all this and uses relay mode by default.
 
 ## Design Philosophy
 
@@ -502,12 +409,11 @@ IntentBridge.register(on: DebugBridge.shared)
 
 ```bash
 # List all exposed intents
-curl -X POST http://device:8765/action/listIntents
+vibecontrol ipad action listIntents
 
 # Run an intent
-curl -X POST http://device:8765/action/intent.resumePlayback
-curl -X POST http://device:8765/action/intent.loveCurrentSection \
-  -H "Content-Type: application/json" -d '{"playSound": false}'
+vibecontrol ipad action intent.resumePlayback
+vibecontrol ipad action intent.loveCurrentSection '{"playSound": false}'
 ```
 
 ### Naming Convention
@@ -543,14 +449,6 @@ Intent actions use the `intent.` prefix to coexist with manual DebugBridge actio
 - WebSocket connections can drop on network changes
 - Relay auto-reconnects with exponential backoff
 - Check for network stability issues
-
-### Direct Mode Issues (if you must use it)
-
-**iOS Local Network permission not prompting:**
-- Check `NSBonjourServices` in Info.plist matches what your code advertises
-- Try uninstalling and reinstalling the app
-- Check Settings → [App Name] → Local Network is enabled
-- Note: The permission prompt is unreliable by design - **use relay mode instead**
 
 ## Future Ideas
 
