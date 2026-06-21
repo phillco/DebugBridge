@@ -136,9 +136,14 @@ public actor DebugBridgeRelay {
     private func startPingLoop() {
         pingTask?.cancel()
         pingTask = Task {
-            while isRunning {
-                try? await Task.sleep(nanoseconds: UInt64(pingInterval * 1_000_000_000))
-                guard isRunning else { return }
+            while isRunning, !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(pingInterval * 1_000_000_000))
+                } catch {
+                    return
+                }
+
+                guard isRunning, !Task.isCancelled else { return }
                 await sendJSON(["type": "ping", "ts": Int(Date().timeIntervalSince1970)])
             }
         }
