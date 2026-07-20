@@ -40,6 +40,7 @@ public final class DebugBridge: ObservableObject {
 
     /// Registered actions that can be triggered remotely
     private var actions: [String: (Parameters) async throws -> ActionResult] = [:]
+    private var nonThrowingActions: [String: (Parameters) async -> ActionResult] = [:]
 
     /// State provider for querying app state
     private var stateProvider: (() -> [String: Any])?
@@ -63,6 +64,7 @@ public final class DebugBridge: ObservableObject {
 
     /// Action handler type
     public typealias ActionHandler = @Sendable (Parameters) async throws -> ActionResult
+    public typealias NonThrowingActionHandler = @Sendable (Parameters) async -> ActionResult
 
     /// Register actions that can be triggered remotely
     public func register(actions newActions: [String: ActionHandler]) {
@@ -70,6 +72,14 @@ public final class DebugBridge: ObservableObject {
             self.actions[key] = value
         }
         logger.info("Registered \(newActions.count) actions: \(newActions.keys.joined(separator: ", "))")
+    }
+
+    /// Register handlers that represent failures in ActionResult instead of throwing.
+    public func register(nonThrowingActions newActions: [String: NonThrowingActionHandler]) {
+        for (key, value) in newActions {
+            self.nonThrowingActions[key] = value
+        }
+        logger.info("Registered \(newActions.count) nonthrowing actions: \(newActions.keys.joined(separator: ", "))")
     }
 
     /// Convenience: register simple void actions
@@ -455,6 +465,11 @@ public final class DebugBridge: ObservableObject {
     }
 
     private func executeAction(name: String, params: Parameters) async -> Response {
+        if let action = nonThrowingActions[name] {
+            let result = await action(params)
+            return .json(result.toDict())
+        }
+
         guard let action = actions[name] else {
             return .notFound("Unknown action: \(name)")
         }
