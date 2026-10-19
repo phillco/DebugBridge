@@ -54,6 +54,12 @@ public final class DebugBridge: ObservableObject {
     /// Screenshot provider
     private var screenshotProvider: (() async -> Data?)?
 
+    /// Directories whose files /files can list and read
+    private var fileRoots: [String: URL] = [:]
+
+    /// When set, relayed requests must carry this token (vibecontrol sends it).
+    public var relayToken: String?
+
     /// App metadata
     public var appName: String = Bundle.main.infoDictionary?["CFBundleName"] as? String ?? "Unknown"
     public var appVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0"
@@ -110,6 +116,12 @@ public final class DebugBridge: ObservableObject {
     /// Register a screenshot provider
     public func register(screenshot provider: @escaping () async -> Data?) {
         self.screenshotProvider = provider
+    }
+
+    /// Register named directories (e.g. the app container and app group) that
+    /// /files can list, read in chunks, and snapshot (SQLite) from.
+    public func register(fileRoots roots: [String: URL]) {
+        fileRoots.merge(roots) { _, new in new }
     }
 
     // MARK: - Server Lifecycle
@@ -247,7 +259,10 @@ public final class DebugBridge: ObservableObject {
         sendResponse(response, to: connection)
     }
 
-    func handleRelayRequest(method: String, path: String, query: [String: String], body: [String: Any]) async -> [String: Any] {
+    func handleRelayRequest(method: String, path: String, query: [String: String], body: [String: Any], token: String?) async -> [String: Any] {
+        if let relayToken, !relayToken.isEmpty, token != relayToken {
+            return responsePayload(.unauthorized)
+        }
         let response = await routeRequest(method: method, path: path, query: query, body: body)
         return responsePayload(response)
     }
@@ -266,6 +281,11 @@ public final class DebugBridge: ObservableObject {
         payload["deviceLocalizedModel"] = UIDevice.current.localizedModel
         payload["systemName"] = UIDevice.current.systemName
         payload["systemVersion"] = UIDevice.current.systemVersion
+        #if targetEnvironment(simulator)
+        payload["isSimulator"] = true
+        #else
+        payload["isSimulator"] = false
+        #endif
         #endif
         return payload
     }
@@ -344,6 +364,10 @@ public final class DebugBridge: ObservableObject {
                 return .png(data)
             }
             return .notFound("Screenshot provider not registered")
+        }
+
+        if pathComponents.first == "files" {
+            return await routeFiles(method: method, path: Array(pathComponents.dropFirst()), query: query, body: body)
         }
 
         #if canImport(UIKit)
@@ -464,6 +488,45 @@ public final class DebugBridge: ObservableObject {
         return .notFound("Unknown endpoint: \(method) \(path)")
     }
 
+    private func routeFiles(method: String, path: [String], query: [String: String], body: [String: Any]) async -> Response {
+        var roots = fileRoots
+        roots[DebugFiles.snapshotRoot] = DebugFiles.snapshotDirectory
+        if method == "GET" && path.isEmpty && query["root"] == nil {
+            return .json(["roots": roots.mapValues(\.path)])
+        }
+        let root = query["root"] ?? body["root"] as? String
+        let filePath = query["path"] ?? body["path"] as? String
+        let work: @Sendable () throws -> [String: Any]
+        do {
+            let url = try DebugFiles.resolve(root: root, path: filePath, roots: roots)
+            switch (method, path) {
+            case ("GET", []):
+                let recursive = query["recursive"] == "1"
+                work = { ["files": try DebugFiles.list(url, recursive: recursive)] }
+            case ("GET", ["read"]):
+                let offset = query["offset"].flatMap(Int.init) ?? 0
+                let length = query["length"].flatMap(Int.init) ?? DebugFiles.maxChunk
+                work = { try DebugFiles.read(url, offset: offset, length: length) }
+            case ("GET", ["sha256"]):
+                work = { ["sha256": try DebugFiles.sha256(url)] }
+            case ("POST", ["snapshot"]):
+                work = {
+                    DebugFiles.pruneSnapshots()
+                    return try DebugFiles.snapshot(url)
+                }
+            default:
+                return .notFound("Unknown endpoint: \(method) /files/\(path.joined(separator: "/"))")
+            }
+            return .json(try await Task.detached(priority: .utility, operation: work).value)
+        } catch DebugFiles.Failure.badRequest(let message) {
+            return .badRequest(message)
+        } catch DebugFiles.Failure.notFound(let message) {
+            return .notFound(message)
+        } catch {
+            return .error(error.localizedDescription)
+        }
+    }
+
     private func executeAction(name: String, params: Parameters) async -> Response {
         if let action = nonThrowingActions[name] {
             let result = await action(params)
@@ -501,6 +564,8 @@ public final class DebugBridge: ObservableObject {
             return ["status": response.statusCode, "contentType": "application/json", "body": ["error": msg]]
         case .error(let msg):
             return ["status": response.statusCode, "contentType": "application/json", "body": ["error": msg]]
+        case .unauthorized:
+            return ["status": response.statusCode, "contentType": "application/json", "body": ["error": "Missing or wrong DebugBridge token"]]
         }
     }
 
@@ -517,7 +582,8 @@ public final class DebugBridge: ObservableObject {
             "hasScreenshot": screenshotProvider != nil,
             "hasLogs": true,
             "hasMetrics": true,
-            "hasPerf": true
+            "hasPerf": true,
+            "hasFiles": !fileRoots.isEmpty
         ]
         #if canImport(UIKit)
         info["hasElements"] = true
@@ -612,11 +678,13 @@ private enum Response {
     case badRequest(String)
     case notFound(String)
     case error(String)
+    case unauthorized
 
     var statusCode: Int {
         switch self {
         case .json, .png: return 200
         case .badRequest: return 400
+        case .unauthorized: return 401
         case .notFound: return 404
         case .error: return 500
         }
@@ -651,6 +719,8 @@ private enum Response {
             return ("404 Not Found", "application/json", "{\"error\":\"\(msg)\"}")
         case .error(let msg):
             return ("500 Internal Server Error", "application/json", "{\"error\":\"\(msg)\"}")
+        case .unauthorized:
+            return ("401 Unauthorized", "application/json", "{\"error\":\"Missing or wrong DebugBridge token\"}")
         }
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import OSLog
 
 public actor DebugBridgeRelay {
@@ -12,28 +13,60 @@ public actor DebugBridgeRelay {
     private var isRunning = false
     private var reconnectDelay: TimeInterval = 2
     private var isReconnecting = false
-    private let maxReconnectDelay: TimeInterval = 30
-    private let pingInterval: TimeInterval = 15
+    // Off the tailnet the relay never resolves; back off far enough that
+    // retrying costs nothing noticeable.
+    private let maxReconnectDelay: TimeInterval = 300
+    private let pingInterval: TimeInterval = 30
+    /// Bumped by start/stop so a sleeping reconnect from an earlier run can't
+    /// open a second socket.
+    private var generation = 0
+    private let session = URLSession(configuration: .default)
+    private let pathMonitor = NWPathMonitor()
+    private var hasNetwork = true
+    private var networkWaiters: [CheckedContinuation<Void, Never>] = []
 
-    private init() {}
+    private init() {
+        pathMonitor.pathUpdateHandler = { path in
+            Task { await DebugBridgeRelay.shared.networkChanged(path.status == .satisfied) }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "DebugBridgeRelay.path"))
+    }
 
     public func start(url: URL) {
         self.url = url
         guard !isRunning else { return }
         isRunning = true
+        generation += 1
+        reconnectDelay = 2
         connect()
     }
 
     public func stop() {
         isRunning = false
         isReconnecting = false
+        generation += 1
         cleanupSocket()
+        resumeNetworkWaiters()
+    }
+
+    private func networkChanged(_ satisfied: Bool) {
+        let regained = satisfied && !hasNetwork
+        hasNetwork = satisfied
+        guard satisfied else { return }
+        resumeNetworkWaiters()
+        // A new path (e.g. joining Wi-Fi) is worth an immediate retry.
+        if regained { reconnectDelay = 2 }
+    }
+
+    private func resumeNetworkWaiters() {
+        let waiters = networkWaiters
+        networkWaiters = []
+        waiters.forEach { $0.resume() }
     }
 
     private func connect() {
         guard let url, isRunning else { return }
 
-        let session = URLSession(configuration: .default)
         let socket = session.webSocketTask(with: url)
         self.socket = socket
         socket.resume()
@@ -104,7 +137,8 @@ public actor DebugBridgeRelay {
             method: method,
             path: path,
             query: query,
-            body: body
+            body: body,
+            token: json["token"] as? String
         )
 
         var response: [String: Any] = ["type": "response", "id": id]
@@ -167,10 +201,17 @@ public actor DebugBridgeRelay {
         isReconnecting = true
         cleanupSocket()
 
-        let delay = reconnectDelay
-        logger.info("Relay reconnecting in \(delay, privacy: .public)s (\(reason, privacy: .public))")
-        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-        reconnectDelay = min(reconnectDelay * 2, maxReconnectDelay)
+        let run = generation
+        if !hasNetwork {
+            logger.info("Relay waiting for a network path (\(reason, privacy: .public))")
+            await withCheckedContinuation { networkWaiters.append($0) }
+        } else {
+            let delay = reconnectDelay * Double.random(in: 0.8...1.2)
+            logger.info("Relay reconnecting in \(delay, privacy: .public)s (\(reason, privacy: .public))")
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            reconnectDelay = min(reconnectDelay * 2, maxReconnectDelay)
+        }
+        guard run == generation else { return }
         isReconnecting = false
         connect()
     }
