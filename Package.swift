@@ -9,5 +9,6 @@ let package = Package(
     ],
     targets: [
         .target(name: "DebugBridge"),
+        .testTarget(name: "DebugBridgeTests", dependencies: ["DebugBridge"]),
     ]
 )

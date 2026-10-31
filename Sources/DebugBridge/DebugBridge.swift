@@ -639,6 +639,17 @@ public struct Parameters {
         self.dict = dict
     }
 
+    /// A detached JSON snapshot for transferring requests between executors.
+    public func encodedJSON() throws -> Data {
+        guard JSONSerialization.isValidJSONObject(dict) else {
+            throw EncodingError.invalidValue(
+                "DebugBridge.Parameters",
+                .init(codingPath: [], debugDescription: "Parameters must contain only JSON values")
+            )
+        }
+        return try JSONSerialization.data(withJSONObject: dict)
+    }
+
     public subscript(key: String) -> Any? { dict[key] }
 
     public func string(_ key: String) -> String? { dict[key] as? String }
